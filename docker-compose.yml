@@ -1,0 +1,8 @@
+version: '3'
+services:
+  icap-server:
+    build: .
+    ports:
+      - "1344:1344"
+    volumes:
+      - ./rules.yar:/app/rules.yar
