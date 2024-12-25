@@ -1,3 +1,14 @@
+# Работа с сервером
+Сборка и запуск
+```
+docker-compose build
+docker-compose up
+```
+Чтение логов
+```
+docker exec -it icap-server_icap-server_1 /bin/bash
+container> cat icap_server.log
+```
 # Тестирование сервера
 1. Проверка OPTIONS
 
