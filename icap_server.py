@@ -64,11 +64,24 @@ class ICAPServer(BaseRequestHandler):
 
             # Проверяем с помощью YARA
             matches = yara_rules.match(data=content)
-            for match in matches:
-                logging.info(f"YARA match: {match}")
+            if matches:
+                for match in matches:
+                    logging.info(f"YARA match: {match}")
 
-        # Возвращаем 204 No Content (ответ не изменен)
-        self.send_icap_response("ICAP/1.0 204 No Content")
+                # В случае нахождения совпадений, можно заменить контент
+                modified_content = self.modify_content(content)
+                self.send_icap_response("ICAP/1.0 200 OK", modified_content)
+            else:
+                # Если совпадений нет, возвращаем стандартный ответ
+                self.send_icap_response("ICAP/1.0 204 No Content")
+        else:
+            self.send_error("400 Bad Request")
+
+    def modify_content(self, content):
+        """Модифицирует контент (например, блокирует или изменяет)."""
+        # Для примера, заменим весь контент на сообщение о блокировке
+        modified_content = "Content blocked due to detected malware.".encode("utf-8")
+        return modified_content
 
     def extract_url(self):
         """Извлекает URL из заголовков запроса."""
@@ -84,9 +97,12 @@ class ICAPServer(BaseRequestHandler):
             return parts[1].encode("utf-8")
         return None
 
-    def send_icap_response(self, status_line):
+    def send_icap_response(self, status_line, body=None):
         """Отправляет ICAP-ответ клиенту."""
-        response = f"{status_line}\r\n\r\n"
+        if body is None:
+            response = f"{status_line}\r\n\r\n"
+        else:
+            response = f"{status_line}\r\n\r\n{body.decode('utf-8')}\r\n"
         self.request.sendall(response.encode("utf-8"))
 
     def send_error(self, message):
