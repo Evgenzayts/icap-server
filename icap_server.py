@@ -1,120 +1,102 @@
 import hashlib
 import yara
 import logging
-import sys
-from pyicap import ICAPServer, BaseICAPRequestHandler
+from socketserver import BaseRequestHandler, TCPServer
 
-# Настроим логирование в файл и консоль
+# Конфигурация логгера
 logging.basicConfig(
+    filename="icap_server.log",
     level=logging.INFO,
-    format='%(asctime)s - %(message)s',
-    handlers=[
-        logging.FileHandler('/app/icap_server.log'),
-        logging.StreamHandler(sys.stdout)  # Добавляем вывод в консоль
-    ]
+    format="%(asctime)s - %(message)s"
 )
 
-# Загрузим YARA-правила
-rules = yara.compile(filepath='/app/rules.yar')
+# Загрузка YARA-правила
+RULES_PATH = "/app/rules.yar"
+yara_rules = yara.compile(filepath=RULES_PATH)
 
 
-def check_file_with_yara(file_data):
-    matches = rules.match(data=file_data)
-    if matches:
-        logging.info("YARA правило сработало!")
-        return True
-    return False
+class ICAPServer(BaseRequestHandler):
+    def handle(self):
+        self.data = self.request.recv(65536).decode("utf-8", errors="ignore")
+        if not self.data:
+            return
 
+        # Определяем метод ICAP
+        if self.data.startswith("OPTIONS"):
+            self.handle_options()
+        elif self.data.startswith("REQMOD"):
+            self.handle_reqmod()
+        elif self.data.startswith("RESPMOD"):
+            self.handle_respmod()
+        else:
+            self.send_error("405 Method Not Allowed")
 
-class MyRequestHandler(BaseICAPRequestHandler):
-    def do_REQMOD(self):
-        try:
-            print(f"Получен запрос от {self.client_address}")
-            sys.stdout.flush()
+    def handle_options(self):
+        """Обработка OPTIONS-запроса."""
+        response = (
+            "ICAP/1.0 200 OK\r\n"
+            "Methods: REQMOD RESPMOD\r\n"
+            "Service: Python ICAP Server\r\n"
+            "Max-Connections: 100\r\n"
+            "Options-TTL: 3600\r\n"
+            "Preview: 1024\r\n\r\n"
+        )
+        self.request.sendall(response.encode("utf-8"))
+        logging.info("OPTIONS request handled successfully")
 
-            encapsulated_header = self.headers.get("Encapsulated")
-            if not encapsulated_header:
-                self.send_error(400, "Missing Encapsulated Header")
-                return
+    def handle_reqmod(self):
+        url = self.extract_url()
+        logging.info(f"REQMOD: {url}")
 
-            # Извлекаем информацию из Encapsulated
-            encapsulated_parts = encapsulated_header.split(',')
-            req_hdr_size = int(encapsulated_parts[0].split('=')[1])
-            req_body_size = int(encapsulated_parts[1].split('=')[1])
+        # Возвращаем 204 No Content (запрос не изменен)
+        self.send_icap_response("ICAP/1.0 204 No Content")
 
-            # Читаем тело запроса
-            content_length = self.headers.get('Content-Length')
-            if content_length:
-                file_data = self.rfile.read(req_body_size)  # Читаем только тело, согласно Encapsulated
-                print(f"Получено {len(file_data)} байт данных: {file_data[:50]}...")
-                sys.stdout.flush()
+    def handle_respmod(self):
+        url = self.extract_url()
+        logging.info(f"RESPMOD: {url}")
 
-            if file_data:
-                file_hash = hashlib.sha256(file_data).hexdigest()
-                print(f"Хеш файла: {file_hash}")
-                sys.stdout.flush()
+        # Извлечение контента
+        content = self.extract_body()
+        if content:
+            # Вычисляем хэш
+            content_hash = hashlib.sha256(content).hexdigest()
+            logging.info(f"Content hash: {content_hash}")
 
-            # Отправка ответа ICAP
-            print("Отправка ответа ICAP 200 OK")
-            sys.stdout.flush()
-            self.send_response(200)
-            self.send_header('ICAP-Status', '200 OK')
-            self.end_headers()
+            # Проверяем с помощью YARA
+            matches = yara_rules.match(data=content)
+            for match in matches:
+                logging.info(f"YARA match: {match}")
 
-            self.wfile.write(b'')  # Отправляем пустое тело
+        # Возвращаем 204 No Content (ответ не изменен)
+        self.send_icap_response("ICAP/1.0 204 No Content")
 
-        except Exception as e:
-            print(f"Ошибка при обработке запроса: {str(e)}")
-            sys.stdout.flush()
-            self.send_error(500, "Internal Server Error")
+    def extract_url(self):
+        """Извлекает URL из заголовков запроса."""
+        for line in self.data.splitlines():
+            if line.startswith("Host:"):
+                return line.split(":", 1)[1].strip()
+        return "unknown"
 
-    def send_error(self, code, message=None):
-        if message is None:
-            message = 'Bad Request'
+    def extract_body(self):
+        """Извлекает тело запроса/ответа."""
+        parts = self.data.split("\r\n\r\n", 1)
+        if len(parts) > 1:
+            return parts[1].encode("utf-8")
+        return None
 
-        # Логируем подробности ошибки один раз
-        print(f"Код ошибки: {code}, Сообщение: {message}")
-        sys.stdout.flush()  # Принудительный сброс вывода
-        logging.error(f"Код ошибки: {code}, Сообщение: {message}")
-        logging.error(f"IP клиента: {self.client_address}")
+    def send_icap_response(self, status_line):
+        """Отправляет ICAP-ответ клиенту."""
+        response = f"{status_line}\r\n\r\n"
+        self.request.sendall(response.encode("utf-8"))
 
-        # Логируем всю строку запроса один раз
-        if hasattr(self, 'requestline') and self.requestline:
-            print(f"Строка запроса: {self.requestline}")
-            sys.stdout.flush()  # Принудительный сброс вывода
-            logging.error(f"Строка запроса: {self.requestline}")
-
-        # Логируем заголовки запроса
-        if hasattr(self, 'headers') and self.headers:
-            print(f"Заголовки запроса: {self.headers}")
-            sys.stdout.flush()  # Принудительный сброс вывода
-            logging.error(f"Заголовки запроса: {self.headers}")
-
-        # Формируем ICAP-ответ
-        try:
-            self.set_icap_response(code, message.encode('utf-8'))
-            self.end_headers()
-            self.wfile.write(self.icap_response)
-        except Exception as e:
-            print(f"Ошибка при отправке ICAP-ответа: {str(e)}")
-            sys.stdout.flush()  # Принудительный сброс вывода
-            logging.error(f"Ошибка при отправке ICAP-ответа: {str(e)}")
-
-    def end_headers(self):
-        """Завершаем отправку заголовков в ICAP-ответ."""
-        self.wfile.write(b'\r\n')  # Отправляем завершающий пустой символ для заголовков
-
-
-class MyICAPServer(ICAPServer):
-    def __init__(self, address, port, handler_class):
-        # Передаем адрес как кортеж (адрес, порт) и handler_class
-        super().__init__((address, port), handler_class)
-
-    def run(self):
-        # Используем метод serve_forever для правильного запуска
-        self.serve_forever()
+    def send_error(self, message):
+        """Отправляет ошибку ICAP."""
+        response = f"ICAP/1.0 500 Internal Server Error\r\n\r\n{message}\r\n"
+        self.request.sendall(response.encode("utf-8"))
 
 
 if __name__ == "__main__":
-    server = MyICAPServer('0.0.0.0', 1344, MyRequestHandler)  # Передаем handler_class
-    server.run()
+    HOST, PORT = "0.0.0.0", 1344
+    with TCPServer((HOST, PORT), ICAPServer) as server:
+        logging.info("ICAP server started on port 1344")
+        server.serve_forever()
